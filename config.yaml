@@ -1,0 +1,60 @@
+# ISP-Probe 配置
+# 所有与本机环境相关的值都集中在这里，代码中不含硬编码地址。
+
+iface:
+  name: ""              # 留空自动识别物理网卡（会自动排除 clash TUN）
+  bind_local_addr: false # 接口索引绑定已足够；开启后额外绑源地址做双保险
+
+router:
+  admin_url: "http://192.168.31.1"   # 面板上可点击的路由器管理页；留空则用默认路由网关
+  rule_page_hint: "WAN口转发规则设置"
+
+# 两条 WAN 线路。modem_ip 是分线 DNS 探测的入口：
+# 向光猫 LAN IP 发 DNS 查询，包必然经路由器对应的 WAN 口出去。
+links:
+  - id: telecom
+    name: "电信"
+    wan_label: "WAN1优先"
+    modem_ip: "192.168.10.1"
+    expect_isp: ["chinanet", "telecom", "电信"]
+  - id: mobile
+    name: "移动"
+    wan_label: "WAN2优先"
+    modem_ip: "192.168.1.1"
+    expect_isp: ["china mobile", "cmcc", "移动"]
+
+probe:
+  interval: 60s          # 每条线的探测间隔
+  min_gap: 2s            # 同一光猫两次查询的最小间隔（实测：连发 5 次会触发限速全部超时）
+  timeout: 5s
+  fail_threshold: 3      # 连续失败多少次才告警，抑制抖动
+  retry_slow: 3          # 判定故障前的降速重试次数，用于排除光猫限速
+  cache_domain: "www.baidu.com"   # 测缓存响应延迟，同时可校验返回节点的运营商归属
+  force_domain: "example.com"     # 用随机子域名强制完整递归，验证上游真的可达
+  anchors:               # TCP connect 延迟锚点，必须是 IP:port（域名会走系统解析器拿到 fake-ip）
+    - "223.5.5.5:443"
+    - "119.29.29.29:443"
+
+speed:
+  streams: 6             # 并发连接数，单流跑不满千兆
+  duration: 12s          # 单向测速时长
+  # 下行测速源。要求：国内高速节点、文件足够大（4GB，避免短时间被下完后反复重连拉低读数）。
+  # 第三个源会 302 到 CDN 域名，程序会自行跟随并对新域名重新做 DoH 解析。
+  # 单条流跑不满带宽，会用 streams 条并发同时拉取（下面的源轮流分配）。
+  download_urls:
+    - "https://mirrors.tuna.tsinghua.edu.cn/ubuntu-releases/20.04.6/ubuntu-20.04.6-desktop-amd64.iso"
+    - "https://mirrors.ustc.edu.cn/ubuntu-releases/20.04.6/ubuntu-20.04.6-desktop-amd64.iso"
+    - "https://mirrors.aliyun.com/ubuntu-releases/20.04.6/ubuntu-20.04.6-desktop-amd64.iso"
+  upload_url: "https://speed.cloudflare.com/__up"
+  egress_urls:
+    - "http://ip-api.com/json/?fields=query,isp,org,as"
+
+store:
+  path: "isp-probe.db"
+  raw_retain: 168h       # 原始采样保留 7 天，之后只留聚合
+
+notify:
+  desktop: true
+
+web:
+  listen: "127.0.0.1:8686"

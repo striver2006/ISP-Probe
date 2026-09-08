@@ -1,0 +1,374 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ISP探针</title>
+<style>
+:root{
+  --bg:#f6f7f9; --card:#fff; --fg:#1a1d21; --muted:#6b7280; --line:#e5e7eb;
+  --ok:#16a34a; --bad:#dc2626; --warn:#d97706; --accent:#2563eb;
+  --okbg:#f0fdf4; --badbg:#fef2f2; --warnbg:#fffbeb;
+}
+@media (prefers-color-scheme:dark){
+  :root{
+    --bg:#0f1115; --card:#171a20; --fg:#e6e8ea; --muted:#9299a3; --line:#272b33;
+    --ok:#4ade80; --bad:#f87171; --warn:#fbbf24; --accent:#60a5fa;
+    --okbg:#0f2417; --badbg:#2a1315; --warnbg:#2a2210;
+  }
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);
+  font:14px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}
+.wrap{max-width:1080px;margin:0 auto;padding:24px 20px 60px}
+header{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;margin-bottom:6px}
+h1{font-size:20px;margin:0;letter-spacing:.5px}
+.sub{color:var(--muted);font-size:13px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px 18px;margin-top:16px}
+.card h2{font-size:14px;margin:0 0 12px;font-weight:600;display:flex;align-items:center;gap:8px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:14px}
+.link{border:1px solid var(--line);border-radius:12px;padding:16px 18px;background:var(--card)}
+.link.ok{border-left:4px solid var(--ok)}
+.link.bad{border-left:4px solid var(--bad)}
+.link-h{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}
+.link-n{font-size:17px;font-weight:600}
+.badge{font-size:12px;padding:3px 10px;border-radius:99px;font-weight:600}
+.badge.ok{background:var(--okbg);color:var(--ok)}
+.badge.bad{background:var(--badbg);color:var(--bad)}
+.kv{display:flex;justify-content:space-between;padding:3px 0;font-size:13px}
+.kv span:first-child{color:var(--muted)}
+.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px}
+.reason{margin-top:8px;padding:8px 10px;background:var(--badbg);color:var(--bad);
+  border-radius:8px;font-size:12.5px}
+button{font:inherit;font-weight:500;padding:8px 16px;border-radius:8px;cursor:pointer;
+  border:1px solid var(--line);background:var(--card);color:var(--fg)}
+button:hover{border-color:var(--accent)}
+button.primary{background:var(--accent);color:#fff;border-color:var(--accent)}
+button.primary:hover{filter:brightness(1.08)}
+button:disabled{opacity:.5;cursor:not-allowed}
+a{color:var(--accent)}
+.hint{background:var(--warnbg);border:1px solid var(--warn);border-radius:10px;padding:14px 16px;margin-top:12px}
+.hint b{color:var(--warn)}
+.steps{margin:10px 0 0;padding-left:20px}
+.steps li{margin:5px 0}
+.macbox{display:inline-flex;align-items:center;gap:8px;background:var(--bg);
+  border:1px solid var(--line);border-radius:6px;padding:3px 6px 3px 10px;margin:0 2px}
+.bar{height:8px;background:var(--line);border-radius:99px;overflow:hidden;margin:10px 0 6px}
+.bar>div{height:100%;background:var(--accent);width:0;transition:width .3s}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th,td{text-align:left;padding:7px 8px;border-bottom:1px solid var(--line)}
+th{color:var(--muted);font-weight:500;font-size:12px}
+td.num{text-align:right;font-family:ui-monospace,Menlo,monospace}
+.chk{display:flex;gap:10px;padding:8px 0;border-bottom:1px solid var(--line);align-items:flex-start}
+.chk:last-child{border-bottom:0}
+.chk .ic{width:18px;flex:none;text-align:center;font-weight:700}
+.chk .nm{font-weight:600;font-size:13px}
+.chk .dt{color:var(--muted);font-size:12.5px}
+.chk .ht{color:var(--accent);font-size:12px;margin-top:2px}
+.ic.ok{color:var(--ok)} .ic.fail{color:var(--bad)} .ic.warn{color:var(--warn)} .ic.info{color:var(--muted)}
+.muted{color:var(--muted)}
+.right{margin-left:auto}
+.row{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+svg{display:block;width:100%;height:120px}
+.foot{color:var(--muted);font-size:12px;margin-top:24px;text-align:center}
+details summary{cursor:pointer;font-size:14px;font-weight:600}
+.note{font-size:12px;color:var(--muted);margin-top:8px;line-height:1.5}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>ISP探针</h1>
+    <span class="sub" id="ifaceInfo">加载中…</span>
+    <span class="right sub" id="conn">连接中…</span>
+  </header>
+
+  <div class="grid" id="links"></div>
+
+  <div class="card">
+    <h2>延迟趋势 <span class="muted" style="font-weight:400">最近 6 小时 · 经各自光猫的 DNS 往返</span></h2>
+    <div id="charts"></div>
+  </div>
+
+  <div class="card">
+    <h2>分线测速</h2>
+    <div class="row">
+      <button class="primary" id="btnSpeed">开始测速</button>
+      <button id="btnStop" style="display:none">停止</button>
+      <span class="muted" id="speedMsg"></span>
+    </div>
+    <div id="speedProg" style="display:none">
+      <div class="bar"><div id="progBar"></div></div>
+      <div class="row"><span class="mono" id="progText"></span></div>
+    </div>
+    <div id="switchHint"></div>
+    <div id="speedResults"></div>
+    <div class="note" id="speedNote"></div>
+  </div>
+
+  <div class="card">
+    <h2>历史测速</h2>
+    <div id="speedHistory" class="muted">暂无记录</div>
+  </div>
+
+  <div class="card">
+    <h2>状态变更</h2>
+    <div id="events" class="muted">暂无事件</div>
+  </div>
+
+  <div class="card">
+    <details id="docDetails">
+      <summary>环境自检 <span class="muted" style="font-weight:400">验证 clash TUN 绕过是否生效</span></summary>
+      <div class="row" style="margin:12px 0"><button id="btnDoc">重新检测</button><span class="muted" id="docTime"></span></div>
+      <div id="doctor" class="muted">展开后自动检测…</div>
+    </details>
+  </div>
+
+  <div class="foot">ISP探针 · 全程绕过 clash TUN 与 DNS 劫持，测得的是真实线路</div>
+</div>
+
+<script>
+const $ = s => document.querySelector(s);
+let lastStatus = null, docLoaded = false;
+
+function fmt(n, d = 1) { return (n || 0).toFixed(d); }
+function timeStr(ts) {
+  const dt = new Date(ts);
+  return dt.toLocaleTimeString('zh-CN', { hour12: false });
+}
+function dateStr(ts) {
+  return new Date(ts).toLocaleString('zh-CN', { hour12: false, month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+}
+function ago(ts) {
+  const s = (Date.now() - new Date(ts).getTime()) / 1000;
+  if (s < 60) return Math.floor(s) + ' 秒前';
+  if (s < 3600) return Math.floor(s / 60) + ' 分钟前';
+  return Math.floor(s / 3600) + ' 小时前';
+}
+
+function renderLinks(d) {
+  $('#ifaceInfo').textContent =
+    `${d.iface.name}（${d.iface.is_wireless ? 'Wi-Fi' : '有线'}） ${d.iface.ip} · MAC ${d.iface.mac} · 合并出口延迟 ${fmt(d.combined_rtt_ms)}ms`;
+
+  $('#links').innerHTML = d.links.map(l => `
+    <div class="link ${l.healthy ? 'ok' : 'bad'}">
+      <div class="link-h">
+        <span class="link-n">${l.name}</span>
+        <span class="badge ${l.healthy ? 'ok' : 'bad'}">${l.healthy ? '正常' : '故障'}</span>
+      </div>
+      <div class="kv"><span>DNS 延迟</span><span class="mono">${l.dns_rtt_ms ? fmt(l.dns_rtt_ms, 0) + ' ms' : '—'}</span></div>
+      <div class="kv"><span>解析节点</span><span class="mono">${(l.resolved || []).join(', ') || '—'}</span></div>
+      <div class="kv"><span>光猫</span><span>${l.modem_alive ? '在线' : '不可达'}</span></div>
+      <div class="kv"><span>上游递归</span><span>${l.forced_ok ? '可达' : '异常'}</span></div>
+      <div class="kv"><span>分线校验</span><span>${l.distinct ? '独立出口' : '<span style="color:var(--warn)">与另一条相同</span>'}</span></div>
+      <div class="kv"><span>最后成功</span><span>${l.last_ok && !l.last_ok.startsWith('0001') ? ago(l.last_ok) : '—'}</span></div>
+      <div class="kv" style="border-top:1px solid var(--line);margin-top:8px;padding-top:8px">
+        <span>24h 成功率</span><span class="mono" id="st-${l.id}">—</span></div>
+      <div class="kv"><span>24h 延迟 P50/P95</span><span class="mono" id="rt-${l.id}">—</span></div>
+      ${l.reason ? `<div class="reason">${l.reason}</div>` : ''}
+    </div>`).join('');
+}
+
+function renderSpeed(d) {
+  const s = d.speed || {};
+  const running = s.phase && !['idle', 'done', 'error'].includes(s.phase);
+  $('#btnSpeed').disabled = running;
+  $('#btnSpeed').textContent = running ? '测速进行中…' : '开始测速';
+  $('#btnStop').style.display = running ? '' : 'none';
+  $('#speedMsg').textContent = s.message || '';
+
+  // 进度条
+  const testing = s.phase === 'testing';
+  $('#speedProg').style.display = testing ? '' : 'none';
+  if (testing && s.progress) {
+    $('#progBar').style.width = (s.progress.percent || 0) + '%';
+    const phase = s.progress.phase === 'upload' ? '上行' : '下行';
+    $('#progText').textContent =
+      `${phase} ${fmt(s.progress.mbps)} Mbps${s.progress.warmup ? '（预热中，数据不计入结果）' : ''}`;
+  }
+
+  // 切换引导
+  const h = s.switch_hint || {};
+  if (h.active) {
+    $('#switchHint').innerHTML = `
+      <div class="hint">
+        <b>需要你操作一步</b>：路由器一个 MAC 同时只能绑一条线，请把本机改绑到另一条线路。
+        <ol class="steps">
+          <li>打开 <a href="${h.router_url}" target="_blank" rel="noopener">${h.router_url}</a> 并登录</li>
+          <li>进入「${h.page_hint}」</li>
+          <li>把 MAC
+            <span class="macbox"><span class="mono">${h.mac}</span>
+              <button onclick="copyMac('${h.mac}')" style="padding:2px 8px;font-size:12px">复制</button>
+            </span>
+            的 WAN 口策略改为 <b>${h.target_wan}</b>（${h.target_link}）
+          </li>
+        </ol>
+        <div class="note">改好后无需回来点击 —— 每 5 秒自动检测一次出口归属，切换生效后会自动开始测 ${h.target_link} 线路。</div>
+      </div>`;
+  } else {
+    $('#switchHint').innerHTML = '';
+  }
+
+  // 本轮结果
+  if (s.results && s.results.length) {
+    $('#speedResults').innerHTML = `
+      <table style="margin-top:14px">
+        <thead><tr><th>线路</th><th class="num">下行</th><th class="num">上行</th><th>出口</th><th>备注</th></tr></thead>
+        <tbody>${s.results.map(r => `
+          <tr>
+            <td>${linkName(d, r.LinkID)}</td>
+            <td class="num">${fmt(r.DownMbps)} Mbps</td>
+            <td class="num">${fmt(r.UpMbps)} Mbps</td>
+            <td class="mono">${r.EgressIP || '—'}<br><span class="muted">${r.EgressISP || ''}</span></td>
+            <td class="muted" style="font-size:12px">${r.Note || ''}</td>
+          </tr>`).join('')}
+        </tbody>
+      </table>`;
+  } else {
+    $('#speedResults').innerHTML = '';
+  }
+
+  $('#speedNote').textContent = d.iface.is_wireless
+    ? '注意：当前经 Wi-Fi 测速，吞吐上限受无线速率制约，可能跑不满宽带带宽。'
+    : '';
+}
+
+function linkName(d, id) {
+  const l = (d.links || []).find(x => x.id === id);
+  return l ? l.name : id;
+}
+
+window.copyMac = mac => navigator.clipboard.writeText(mac);
+
+function sparkline(points) {
+  if (!points.length) return '<div class="muted">暂无数据</div>';
+  const W = 800, H = 120, pad = 4;
+  const vals = points.filter(p => p.ok && p.rtt_ms > 0).map(p => p.rtt_ms);
+  const max = Math.max(...vals, 10) * 1.15, min = 0;
+  const t0 = points[0].ts, t1 = points[points.length - 1].ts || t0 + 1;
+  const x = p => pad + (p.ts - t0) / Math.max(1, t1 - t0) * (W - pad * 2);
+  const y = v => H - pad - (v - min) / (max - min) * (H - pad * 2);
+
+  let d = '', open = false;
+  for (const p of points) {
+    if (!p.ok || !p.rtt_ms) { open = false; continue; }
+    d += (open ? 'L' : 'M') + x(p).toFixed(1) + ' ' + y(p.rtt_ms).toFixed(1) + ' ';
+    open = true;
+  }
+  // 故障区间标红
+  const fails = points.filter(p => !p.ok)
+    .map(p => `<rect x="${x(p).toFixed(1)}" y="0" width="2" height="${H}" fill="var(--bad)" opacity=".55"/>`).join('');
+
+  return `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">
+    ${fails}
+    <path d="${d}" fill="none" stroke="var(--accent)" stroke-width="1.6"/>
+  </svg>
+  <div class="row" style="justify-content:space-between;font-size:11px" class="muted">
+    <span class="muted">${timeStr(t0)}</span>
+    <span class="muted">峰值 ${fmt(Math.max(...vals, 0), 0)}ms</span>
+    <span class="muted">${timeStr(t1)}</span>
+  </div>`;
+}
+
+async function loadCharts(d) {
+  const box = $('#charts');
+  let html = '';
+  for (const l of d.links) {
+    const pts = await fetch(`/api/history?link=${encodeURIComponent(l.id)}&hours=6`).then(r => r.json()).catch(() => []);
+    html += `<div style="margin-bottom:14px"><div class="row"><b>${l.name}</b>
+      <span class="muted right">${(pts || []).length} 个采样点</span></div>${sparkline(pts || [])}</div>`;
+  }
+  box.innerHTML = html;
+}
+
+async function loadStats() {
+  const st = await fetch('/api/stats?hours=24').then(r => r.json()).catch(() => null);
+  if (!st) return;
+  for (const [id, v] of Object.entries(st)) {
+    const a = document.getElementById('st-' + id), b = document.getElementById('rt-' + id);
+    if (a) a.innerHTML = v.n
+      ? `${(100 - v.loss_pct).toFixed(1)}% <span class="muted">(${v.n_ok}/${v.n})</span>`
+      : '<span class="muted">暂无数据</span>';
+    if (b) b.textContent = v.rtt_p50 ? `${v.rtt_p50.toFixed(0)} / ${v.rtt_p95.toFixed(0)} ms` : '—';
+  }
+}
+
+async function loadEvents() {
+  const evs = await fetch('/api/events').then(r => r.json()).catch(() => []);
+  if (!evs || !evs.length) { $('#events').innerHTML = '<span class="muted">暂无事件</span>'; return; }
+  $('#events').innerHTML = `<table><tbody>${evs.map(e => `
+    <tr><td style="width:130px" class="muted">${dateStr(e.TS)}</td>
+    <td><span class="badge ${e.Kind === 'up' ? 'ok' : 'bad'}">${e.Kind === 'up' ? '恢复' : '故障'}</span></td>
+    <td>${e.Message}</td></tr>`).join('')}</tbody></table>`;
+}
+
+async function loadSpeedHistory() {
+  const rs = await fetch('/api/speeds').then(r => r.json()).catch(() => []);
+  if (!rs || !rs.length) { $('#speedHistory').innerHTML = '<span class="muted">暂无记录</span>'; return; }
+  $('#speedHistory').innerHTML = `<table>
+    <thead><tr><th>时间</th><th>线路</th><th class="num">下行</th><th class="num">上行</th><th>出口</th><th>链路</th></tr></thead>
+    <tbody>${rs.map(r => `<tr>
+      <td class="muted">${dateStr(r.TS)}</td>
+      <td>${lastStatus ? linkName(lastStatus, r.LinkID) : r.LinkID}</td>
+      <td class="num">${fmt(r.DownMbps)}</td>
+      <td class="num">${fmt(r.UpMbps)}</td>
+      <td class="mono">${r.EgressISP || r.EgressIP || '—'}</td>
+      <td class="muted">${r.Wireless ? 'Wi-Fi' : '有线'}</td>
+    </tr>`).join('')}</tbody></table>`;
+}
+
+async function loadDoctor(refresh) {
+  $('#doctor').innerHTML = '<span class="muted">检测中…</span>';
+  const rep = await fetch('/api/doctor' + (refresh ? '?refresh=1' : '')).then(r => r.json()).catch(() => null);
+  if (!rep) { $('#doctor').innerHTML = '<span class="muted">检测失败</span>'; return; }
+  $('#docTime').textContent = '检测于 ' + dateStr(rep.ts);
+  $('#doctor').innerHTML = rep.checks.map(c => `
+    <div class="chk">
+      <div class="ic ${c.level}">${{ ok: '✓', fail: '✗', warn: '!', info: '·' }[c.level] || '·'}</div>
+      <div><div class="nm">${c.name}</div><div class="dt">${c.detail}</div>
+      ${c.hint ? `<div class="ht">↳ ${c.hint}</div>` : ''}</div>
+    </div>`).join('');
+}
+
+function apply(d) {
+  lastStatus = d;
+  renderLinks(d);
+  renderSpeed(d);
+  loadStats();
+}
+
+// SSE 实时更新
+let es;
+function connect() {
+  es = new EventSource('/api/stream');
+  es.onopen = () => { $('#conn').textContent = '实时连接'; };
+  es.onmessage = e => { try { apply(JSON.parse(e.data)); } catch (_) { } };
+  es.onerror = () => {
+    $('#conn').textContent = '连接中断，重连中…';
+    es.close();
+    setTimeout(connect, 3000);
+  };
+}
+
+$('#btnSpeed').onclick = async () => {
+  $('#btnSpeed').disabled = true;
+  await fetch('/api/speed/start', { method: 'POST' });
+};
+$('#btnStop').onclick = () => fetch('/api/speed/stop', { method: 'POST' });
+$('#btnDoc').onclick = () => loadDoctor(true);
+$('#docDetails').addEventListener('toggle', e => {
+  if (e.target.open && !docLoaded) { docLoaded = true; loadDoctor(false); }
+});
+
+// 初始加载
+fetch('/api/status').then(r => r.json()).then(d => {
+  apply(d);
+  loadCharts(d);
+});
+connect();
+loadEvents();
+loadSpeedHistory();
+setInterval(() => { if (lastStatus) loadCharts(lastStatus); loadEvents(); loadSpeedHistory(); loadStats(); }, 60000);
+</script>
+</body>
+</html>

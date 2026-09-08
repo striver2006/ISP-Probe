@@ -1,0 +1,14 @@
+# 构建产物
+/isp-probe
+/isp-probe.exe
+/dist/
+
+# 运行时数据
+*.db
+*.db-shm
+*.db-wal
+
+# 编辑器
+.vscode/
+.idea/
+.DS_Store
