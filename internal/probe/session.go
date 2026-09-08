@@ -13,8 +13,11 @@ import (
 
 // 测速会话的阶段。
 const (
-	PhaseIdle       = "idle"        // 未开始
-	PhaseDetecting  = "detecting"   // 正在识别当前出口走的是哪条线
+	PhaseIdle      = "idle"      // 未开始
+	PhaseDetecting = "detecting" // 正在识别当前出口走的是哪条线
+	// PhaseConfirm 等待用户确认要测哪条线。用户此刻可以先去路由器改绑 MAC，
+	// 程序会自动察觉并更新待测线路，不必重新发起测速。
+	PhaseConfirm    = "confirm"
 	PhaseTesting    = "testing"     // 正在测速
 	PhaseAwaitSwitch = "await_switch" // 等待用户在路由器上改绑 MAC 到另一条线
 	PhaseDone       = "done"
@@ -76,6 +79,8 @@ type SpeedSession struct {
 	mu     sync.RWMutex
 	state  SessionState
 	cancel context.CancelFunc
+	// confirmCh 接收用户在确认阶段点下「开始测试」的信号。
+	confirmCh chan struct{}
 
 	onChange func()
 }
@@ -118,6 +123,8 @@ func (s *SpeedSession) Start(parent context.Context) error {
 	}
 	ctx, cancel := context.WithCancel(parent)
 	s.cancel = cancel
+	// 每轮重建，避免上一轮残留的确认信号让新一轮直接跳过确认。
+	s.confirmCh = make(chan struct{}, 1)
 	s.state = SessionState{Phase: PhaseDetecting, StartedAt: time.Now(),
 		Message: "正在识别当前出口走的是哪条线路…"}
 	s.mu.Unlock()
@@ -176,6 +183,17 @@ func (s *SpeedSession) run(ctx context.Context) {
 			continue
 		}
 
+		// 开测第一条之前先让用户确认：当前 MAC 绑的是哪条线由路由器决定，
+		// 用户很可能想先测另一条。这里给出当前绑定状态和改绑入口，
+		// 等用户点头再开始 —— 而不是默认拿当前这条就测。
+		if len(tested) == 0 {
+			l, e, ok := s.awaitConfirm(ctx, link, eg)
+			if !ok {
+				return
+			}
+			link, eg = l, e
+		}
+
 		s.update(func(st *SessionState) {
 			st.Phase = PhaseTesting
 			st.CurrentLinkID = link.ID
@@ -207,6 +225,92 @@ func (s *SpeedSession) run(ctx context.Context) {
 			return
 		}
 	}
+}
+
+// Confirm 是用户在确认阶段点下「开始测试」的入口。
+func (s *SpeedSession) Confirm() error {
+	s.mu.RLock()
+	phase := s.state.Phase
+	ch := s.confirmCh
+	s.mu.RUnlock()
+
+	if phase != PhaseConfirm || ch == nil {
+		return fmt.Errorf("当前不处于等待确认阶段")
+	}
+	select {
+	case ch <- struct{}{}:
+	default: // 已经确认过，忽略重复点击
+	}
+	return nil
+}
+
+// awaitConfirm 展示当前绑定状态并等待用户确认。
+//
+// 等待期间每 5 秒复查一次出口归属：用户完全可能在这时才去路由器改绑，
+// 程序察觉后直接更新待测线路，用户不需要退出重来。
+//
+// 返回最终确认时的线路。false 表示会话已取消。
+func (s *SpeedSession) awaitConfirm(ctx context.Context, link *config.LinkConfig, eg Egress) (*config.LinkConfig, Egress, bool) {
+	curLink, curEg := link, eg
+	s.showConfirm(curLink, curEg)
+
+	poll := time.NewTicker(5 * time.Second)
+	defer poll.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil, Egress{}, false
+
+		case <-s.confirmCh:
+			return curLink, curEg, true
+
+		case <-poll.C:
+			l, e, err := s.detectLink(ctx)
+			if err != nil {
+				continue // 改绑瞬间可能短暂不通，继续等
+			}
+			if l.ID != curLink.ID {
+				curLink, curEg = l, e
+				s.showConfirm(curLink, curEg)
+			}
+		}
+	}
+}
+
+// showConfirm 更新确认阶段的状态：当前会测哪条线，以及想换一条该怎么做。
+func (s *SpeedSession) showConfirm(link *config.LinkConfig, eg Egress) {
+	var others []PendingLink
+	for i := range s.cfg.Links {
+		if s.cfg.Links[i].ID == link.ID {
+			continue
+		}
+		others = append(others, PendingLink{
+			ID: s.cfg.Links[i].ID, Name: s.cfg.Links[i].Name,
+			WANLabel: s.cfg.Links[i].WANLabel,
+		})
+	}
+
+	hint := SwitchHint{
+		Active:    true,
+		RouterURL: s.cfg.Router.AdminURL,
+		PageHint:  s.cfg.Router.RulePageHint,
+		MAC:       s.tester.binder.MAC,
+	}
+	if len(others) > 0 {
+		hint.TargetWAN = others[0].WANLabel
+		hint.TargetLink = others[0].Name
+	}
+
+	s.update(func(st *SessionState) {
+		st.Phase = PhaseConfirm
+		st.CurrentLinkID = link.ID
+		st.CurrentLinkName = link.Name
+		st.Egress = eg
+		st.Pending = others
+		st.SwitchHint = hint
+		st.Message = fmt.Sprintf("当前本机走的是 %s 线路（出口 %s）", link.Name, eg.Describe())
+	})
 }
 
 // detectLink 通过出口 IP 的运营商归属判断当前走的是哪条线。

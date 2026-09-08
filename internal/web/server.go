@@ -67,6 +67,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/speeds", s.handleSpeeds)
 	mux.HandleFunc("GET /api/speed/state", s.handleSpeedState)
 	mux.HandleFunc("POST /api/speed/start", s.handleSpeedStart)
+	mux.HandleFunc("POST /api/speed/confirm", s.handleSpeedConfirm)
 	mux.HandleFunc("POST /api/speed/stop", s.handleSpeedStop)
 	mux.HandleFunc("GET /api/stream", s.handleStream)
 
@@ -339,6 +340,15 @@ func (s *Server) handleSpeedStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, map[string]string{"status": "started"})
+}
+
+// handleSpeedConfirm 是用户在确认阶段点下「开始测试当前线路」的入口。
+func (s *Server) handleSpeedConfirm(w http.ResponseWriter, r *http.Request) {
+	if err := s.session.Confirm(); err != nil {
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
+	writeJSON(w, map[string]string{"status": "confirmed"})
 }
 
 func (s *Server) handleSpeedStop(w http.ResponseWriter, r *http.Request) {

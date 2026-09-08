@@ -46,7 +46,11 @@ speed:
     - "https://mirrors.ustc.edu.cn/ubuntu-releases/20.04.6/ubuntu-20.04.6-desktop-amd64.iso"
     - "https://mirrors.aliyun.com/ubuntu-releases/20.04.6/ubuntu-20.04.6-desktop-amd64.iso"
   upload_url: "https://speed.cloudflare.com/__up"
+  # 出口归属查询源，按顺序尝试。国内源放前面：这条链路在测速确认和
+  # 切换检测时会反复走，用国际服务会让每次识别都卡十几秒。
   egress_urls:
+    - "https://myip.ipip.net"
+    - "https://cip.cc"
     - "http://ip-api.com/json/?fields=query,isp,org,as"
 
 store:

@@ -133,7 +133,11 @@ func Default() Config {
 				"https://mirrors.aliyun.com/ubuntu-releases/20.04.6/ubuntu-20.04.6-desktop-amd64.iso",
 			},
 			UploadURL:  "https://speed.cloudflare.com/__up",
-			EgressURLs: []string{"http://ip-api.com/json/?fields=query,isp,org,as"},
+			EgressURLs: []string{
+				"https://myip.ipip.net",
+				"https://cip.cc",
+				"http://ip-api.com/json/?fields=query,isp,org,as",
+			},
 		},
 		Store:  StoreConfig{Path: "isp-probe.db", RawRetain: 7 * 24 * time.Hour},
 		Notify: NotifyConfig{Desktop: true},

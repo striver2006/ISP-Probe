@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 
@@ -53,6 +54,17 @@ func LookupEgress(ctx context.Context, b *netbind.Binder, r *dnsx.Resolver, endp
 	return Egress{}, fmt.Errorf("出口归属查询全部失败: %w", lastErr)
 }
 
+var ipv4Re = regexp.MustCompile(`\b(?:\d{1,3}\.){3}\d{1,3}\b`)
+
+// cleanISPText 从纯文本响应里剥出可读的归属描述。
+func cleanISPText(txt, ip string) string {
+	out := strings.ReplaceAll(txt, ip, " ")
+	for _, p := range []string{"当前 IP：", "当前 IP:", "当前IP：", "来自于：", "来自于:", "IP:", "IP："} {
+		out = strings.ReplaceAll(out, p, " ")
+	}
+	return strings.Join(strings.Fields(out), " ")
+}
+
 func lookupOne(ctx context.Context, client *http.Client, raw string) (Egress, error) {
 	// URL 保留域名：dialer 会用 DoH 解析它，SNI 与 Host 头因而都正确。
 	req, err := newRequest(ctx, http.MethodGet, raw, nil)
@@ -96,10 +108,15 @@ func lookupOne(ctx context.Context, client *http.Client, raw string) (Egress, er
 		}
 	}
 
-	// 退化处理：纯文本只返回一个 IP
+	// 纯文本响应：抽出其中的 IPv4，其余部分当作归属描述。
+	// myip.ipip.net 返回形如「当前 IP：1.2.3.4  来自于：中国 浙江 杭州  移动」，
+	// 其中的中文运营商名正好能被配置里的中文 expect_isp 关键字匹配到。
 	txt := strings.TrimSpace(string(body))
-	if len(txt) > 0 && len(txt) < 64 && !strings.ContainsAny(txt, " \n\t<") {
-		return Egress{IP: txt, From: host}, nil
+	if len(txt) > 512 {
+		txt = txt[:512]
+	}
+	if ip := ipv4Re.FindString(txt); ip != "" {
+		return Egress{IP: ip, ISP: cleanISPText(txt, ip), From: host}, nil
 	}
 	return Egress{}, fmt.Errorf("无法从响应中解析出口 IP")
 }

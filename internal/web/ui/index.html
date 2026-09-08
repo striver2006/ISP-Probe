@@ -187,22 +187,48 @@ function renderSpeed(d) {
       `${phase} ${fmt(s.progress.mbps)} Mbps${s.progress.warmup ? '（预热中，数据不计入结果）' : ''}`;
   }
 
-  // 切换引导
+  // 引导卡片：确认阶段与「测完等切换」阶段文案不同
   const h = s.switch_hint || {};
-  if (h.active) {
+  const steps = `
+    <ol class="steps">
+      <li>打开 <a href="${h.router_url}" target="_blank" rel="noopener">${h.router_url}</a> 并登录</li>
+      <li>进入「${h.page_hint}」</li>
+      <li>把 MAC
+        <span class="macbox"><span class="mono">${h.mac}</span>
+          <button onclick="copyMac('${h.mac}')" style="padding:2px 8px;font-size:12px">复制</button>
+        </span>
+        的 WAN 口策略改为 <b>${h.target_wan}</b>（${h.target_link}）
+      </li>
+    </ol>`;
+
+  if (s.phase === 'confirm' && h.active) {
+    // 还没开测。告诉用户当前 MAC 绑的是哪条线，想换就现在换。
     $('#switchHint').innerHTML = `
       <div class="hint">
-        <b>需要你操作一步</b>：路由器一个 MAC 同时只能绑一条线，请把本机改绑到另一条线路。
-        <ol class="steps">
-          <li>打开 <a href="${h.router_url}" target="_blank" rel="noopener">${h.router_url}</a> 并登录</li>
-          <li>进入「${h.page_hint}」</li>
-          <li>把 MAC
-            <span class="macbox"><span class="mono">${h.mac}</span>
-              <button onclick="copyMac('${h.mac}')" style="padding:2px 8px;font-size:12px">复制</button>
-            </span>
-            的 WAN 口策略改为 <b>${h.target_wan}</b>（${h.target_link}）
-          </li>
-        </ol>
+        <b>当前将测试：${s.current_link_name} 线路</b>
+        <div class="note" style="margin-top:6px">
+          出口 ${s.egress?.IP || ''} ${s.egress?.ISP ? '· ' + s.egress.ISP : ''} ——
+          路由器一个 MAC 同时只能绑一条线，本机此刻走的就是这条。
+        </div>
+        ${h.target_link ? `<div style="margin-top:10px">若想改测 <b>${h.target_link}</b>，现在去路由器改绑：</div>${steps}
+        <div class="note">改好后不必刷新，页面每 5 秒自动复查出口，会自己更新成 ${h.target_link}。</div>` : ''}
+        <div class="row" style="margin-top:12px">
+          <button class="primary" id="btnConfirm">开始测试 ${s.current_link_name} 线路</button>
+          <button id="btnCancel">取消</button>
+        </div>
+      </div>`;
+    $('#btnConfirm').onclick = e => {
+      e.target.disabled = true;
+      fetch('/api/speed/confirm', { method: 'POST' });
+    };
+    $('#btnCancel').onclick = () => fetch('/api/speed/stop', { method: 'POST' });
+
+  } else if (h.active) {
+    // 已测完一条，必须改绑才能测另一条。
+    $('#switchHint').innerHTML = `
+      <div class="hint">
+        <b>需要你操作一步</b>：路由器一个 MAC 同时只能绑一条线，请把本机改绑到 ${h.target_link}。
+        ${steps}
         <div class="note">改好后无需回来点击 —— 每 5 秒自动检测一次出口归属，切换生效后会自动开始测 ${h.target_link} 线路。</div>
       </div>`;
   } else {
