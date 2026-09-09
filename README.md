@@ -1,6 +1,27 @@
-# ISP-Probe / ISP探针
+<div align="center">
 
-家庭双线宽带（电信 + 移动 1:1 分流）的接入点监测工具。定时检测两条线各自的连通状态，并支持引导式分线测速。
+# 📡 ISP 探针
+
+<p>
+
+**双线宽带接入点监测 · ISP Probe**
+
+家庭双线宽带（电信 + 移动 1:1 分流）分线连通性监控与引导式测速工具
+
+</p>
+
+[![CI](https://github.com/striver2006/ISP-Probe/actions/workflows/ci.yml/badge.svg)](https://github.com/striver2006/ISP-Probe/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Platform](https://img.shields.io/badge/Platform-macOS-lightgrey?logo=apple)](#平台支持)
+[![Platform](https://img.shields.io/badge/Platform-Windows-blue?logo=windows)](#平台支持)
+[![Go](https://img.shields.io/badge/Go-1.27-00ADD8?logo=go&logoColor=white)](go.mod)
+[![CGO](https://img.shields.io/badge/CGO-disabled-success)](#几个刻意的设计取舍)
+
+简体中文 | [English](README.en.md)
+
+</div>
+
+---
 
 全程绕过本机 clash verge 的 TUN 与 DNS 劫持 —— 否则测到的是代理链路，不是宽带线路。
 
@@ -217,7 +238,25 @@ web:
 macOS 与 Windows，纯 Go 依赖，`CGO_ENABLED=0` 直接交叉编译：
 
 ```bash
-CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build ./cmd/isp-probe
+CGO_ENABLED=0 GOOS=darwin  GOARCH=arm64 go build -o isp-probe     ./cmd/isp-probe
+CGO_ENABLED=0 GOOS=darwin  GOARCH=amd64 go build -o isp-probe     ./cmd/isp-probe
+CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -o isp-probe.exe ./cmd/isp-probe
 ```
 
+系统版本下限跟随 Go 工具链本身的支持范围（见 [go.mod](go.mod) 里的 Go 版本），项目代码不额外依赖更新的系统 API。刻意**不提供 Linux 构建** —— 服务管理、网卡探测、路由表解析都是分平台实现的，留个能编译但跑不了的 stub 只会制造假象。
+
 Windows 注意：mihomo 开启 `strict-route` 时会用 WFP 在内核层封掉所有非 TUN 接口的 53 端口，分线通道会失效（`doctor` 会检测并提示）。Clash Verge Rev 默认关闭该选项。
+
+## 参与贡献
+
+见 [CONTRIBUTING.md](CONTRIBUTING.md)。简而言之：`go vet ./... && GOOS=windows go vet ./... && go test ./...` 要过，`./isp-probe doctor` 要全绿。
+
+提 issue 时请附上 `doctor` 的输出（**注意先脱敏内网地址与 MAC**）。
+
+## 变更记录
+
+见 [docs/CHANGELOG.md](docs/CHANGELOG.md)。
+
+## 许可证
+
+[MIT](LICENSE)

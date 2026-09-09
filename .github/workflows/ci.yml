@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: 测试与构建
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: 格式检查
+        run: |
+          # 只检查本次改动涉及的包，仓库里有几个历史文件未格式化。
+          test -z "$(gofmt -l internal/notify internal/httpx internal/web internal/apppath internal/applog internal/applock)"
+
+      - name: go vet（macOS）
+        run: go vet ./...
+
+      - name: go vet（Windows 交叉）
+        run: GOOS=windows go vet ./...
+
+      - name: 测试
+        run: go test ./...
+
+      # 纯 Go 依赖，CGO_ENABLED=0 必须能交叉编译到两个平台 ——
+      # 这是选 modernc.org/sqlite 而不是 mattn/go-sqlite3 的全部理由。
+      - name: 交叉编译
+        run: |
+          CGO_ENABLED=0 GOOS=darwin  GOARCH=arm64 go build -o /dev/null ./...
+          CGO_ENABLED=0 GOOS=darwin  GOARCH=amd64 go build -o /dev/null ./...
+          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -o /dev/null ./...
