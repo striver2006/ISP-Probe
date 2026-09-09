@@ -24,7 +24,7 @@ links:
     expect_isp: ["china mobile", "cmcc", "移动"]
 
 probe:
-  interval: 300s         # 每条线的探测间隔
+  interval: 60s          # 每条线的探测间隔
   min_gap: 2s            # 同一光猫两次查询的最小间隔（实测：连发 5 次会触发限速全部超时）
   timeout: 5s
   fail_threshold: 3      # 连续失败多少次才告警，抑制抖动
