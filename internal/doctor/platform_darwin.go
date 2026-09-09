@@ -88,3 +88,8 @@ func explainBlockErr(err error) (blocked bool, hint string) {
 	}
 	return false, ""
 }
+
+// firewallHint 说明本平台放行入站连接需要做什么。
+func firewallHint() string {
+	return "首次有外部设备访问时，macOS 会弹窗询问是否允许接受传入连接，选「允许」"
+}

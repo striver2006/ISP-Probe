@@ -17,7 +17,15 @@ go build -o isp-probe ./cmd/isp-probe
 ./isp-probe serve    # 常驻监测 + 面板 http://127.0.0.1:8686
 ```
 
+想让它一直在后台跑、开机自启：
+
+```bash
+./isp-probe service install    # 装成随登录自启的服务（见「作为服务运行」）
+```
+
 ## 命令
+
+按需运行，前台执行，Ctrl-C 退出：
 
 | 命令 | 说明 |
 |---|---|
@@ -26,7 +34,54 @@ go build -o isp-probe ./cmd/isp-probe
 | `speed` | 对当前出口所在的线路做一次上下行测速 |
 | `serve` | 常驻运行，定时探测 + Web 面板 |
 
-通用选项：`-c <配置文件>`（默认 `config.yaml`）、`-v`（调试日志）。
+后台服务：
+
+| 命令 | 说明 |
+|---|---|
+| `service install` | 安装为随登录自启的服务并启动 |
+| `service uninstall` | 停止并卸载 |
+| `service start` / `stop` | 启停已安装的服务（`stop` 不卸载，下次登录仍会自启） |
+| `service status` | 查看安装与运行状态 |
+| `service logs [-n N]` | 打印服务日志尾部 |
+
+通知：
+
+| 命令 | 说明 |
+|---|---|
+| `notify test` | 向已配置的 IM 渠道各发一条测试消息（`--name` 只测其中一个） |
+
+通用选项：`-v`（调试日志）、`-c <配置文件>`。`-c` 不指定时依次在**当前目录**、**可执行文件所在目录**查找 `config.yaml` —— 前者保证仓库里直接跑的既有习惯不变，后者让整个目录拷到哪儿都能用。
+
+## 作为服务运行
+
+```bash
+./isp-probe service install    # 安装 + 启动 + 自动验证面板是否真的起来了
+./isp-probe service status
+./isp-probe service logs -n 50
+```
+
+`install` 默认先跑一遍 `doctor`：TUN 绕过没生效时程序不会报错，只会安静地产出假数据 —— 一个后台常驻、无人盯着的服务产出假数据，比前台跑危险得多。确实要跳过就加 `--skip-doctor`。其它选项：`--no-start`（只装不启动）、`--force`（已安装时覆盖）、`--log-dir`。
+
+**配置、数据库、日志都锚定在 config.yaml 所在目录**，整个文件夹搬走照样能用。服务定义里记的是安装时解析出的绝对路径，所以搬完要重新 `install`。
+
+**日志**：服务模式写 `logs/isp-probe.log`（默认 8MB 轮转、保留 3 个，见 config.yaml 的 `log` 段）。前台运行仍然只输出到 stderr，与服务化之前没有区别。同目录下的 `launchd.out.log` / `launchd.err.log` 只兜底捕获 Go runtime panic 这类绕过日志系统的输出，正常情况下应该是空的。
+
+**同时只能跑一个**。服务在跑的时候再执行 `serve`，会拿到写明占用者是谁的提示而不是一句 `address already in use`。`probe` / `speed` 不受影响 —— 服务跑着的时候，随手看一眼这件事不该被挡住。
+
+### macOS
+
+装成 **LaunchAgent**（`~/Library/LaunchAgents/com.czb.isp-probe.plist`），不需要 sudo。跑在用户的图形会话里，所以桌面通知能正常弹出；代价是**登录之后**才启动，不是严格意义的开机即启。崩溃会自动重启（最小间隔 10 秒），正常退出则不会 —— 这样 `service stop` 才不会被立刻拉回来。
+
+别从 SSH 会话里安装：作业可能落到错误的域，结果是桌面通知静默失效。`install` 会检测并拦截，确实需要就加 `--force`。
+
+### Windows
+
+装成 Windows 服务（服务名 `ISPProbe`），**需要管理员权限**（`status` 除外）。启动类型是「自动（延迟启动）」：开机瞬间网络栈和物理网卡还没就绪，`iface.Detect` 会失败或选错卡，对每分钟一次的探测来说晚几十秒毫无损失。崩溃后按 5s / 30s / 60s 三级自动重启。
+
+两个已知限制：
+
+- **桌面通知收不到**。Windows 服务跑在 session 0，与用户桌面隔离。装完会提示你把 `notify.desktop` 改成 `false` —— 配上 [IM 通知](#im-通知)，掉线消息就能推到手机上，这正是它要解决的场景。
+- 服务以 LocalSystem 身份创建数据库文件，普通用户跑 `probe` 可能因权限不足写不进去。安装目录建议放 `C:\ISP-Probe\` 这类用户可写的位置，而不是 `C:\Program Files`。
 
 ## 两种能力，配置成本不同
 
@@ -39,7 +94,7 @@ go build -o isp-probe ./cmd/isp-probe
 经 192.168.1.1 （移动光猫）解析 www.baidu.com → 223.109.82.16   移动节点
 ```
 
-两条线同时监控，掉线即告警。
+两条线同时监控，掉线即告警 —— 桌面通知，以及推到手机的 [IM 通知](#im-通知)。
 
 ### 分线测速 — 需要一步手动操作
 
@@ -78,6 +133,74 @@ go build -o isp-probe ./cmd/isp-probe
 - `links[].wan_label` — 引导文案里让用户在路由器上选的策略名
 - `router.admin_url` — 面板上可点击的路由器管理页链接
 - `probe.min_gap` — 同一光猫两次查询的最小间隔
+
+**密钥不要写进 `config.yaml`** —— 它随仓库提交。同目录下放一个 `config.local.yaml`（已在 `.gitignore` 里），只写要覆盖的字段，加载时会叠加到主配置上：
+
+```yaml
+# config.local.yaml —— 不提交
+web:
+  token: "一串随便什么"
+notify:
+  webhooks:
+    - name: "企微告警群"
+      kind: wecom
+      url: "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=真实key"
+      enabled: true
+```
+
+旁路文件只在**主配置文件所在目录**查找，所以服务模式下天然可用。注意**列表是整体替换而不是追加**：旁路里写了 `webhooks` 就是全量覆盖主配置里那份。文件不存在很正常；存在却解析失败会直接报错 —— 静默忽略会让你以为密钥已经生效，实际一条告警都发不出去。
+
+## IM 通知
+
+掉线时把消息推到手机上。这是给**服务模式**准备的：Windows 服务跑在 session 0，桌面通知根本送不到你面前，而「一条线静默失效」本来就是无人盯着的场景。
+
+支持企业微信、钉钉、飞书群机器人，以及通用自定义 webhook。配置写在 `config.local.yaml`（见上），配完验证一下：
+
+```bash
+./isp-probe notify test          # 或在面板的「通知渠道」卡片点「测试」
+```
+
+各平台的机器人地址都从群设置里拿（群设置 → 群机器人 → 添加）。以飞书为例：
+
+```yaml
+# config.local.yaml
+notify:
+  webhooks:
+    - name: "飞书告警群"
+      kind: feishu
+      url: "https://open.feishu.cn/open-apis/bot/v2/hook/xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+      secret: ""        # 安全设置选「签名校验」时填，选关键词/IP 白名单则留空
+      enabled: true
+```
+
+添加机器人时飞书会要求至少选一种安全设置：
+
+- **签名校验** — 把它给的密钥填进 `secret`。
+- **自定义关键词** — 留空 `secret`，关键词填 `ISP探针` 或 `线路`；本工具发出的正文形如 `ISP探针 · 线路故障 / 电信 线路故障：…`，都能匹配上。
+- **IP 白名单** — 填你家宽带的公网 IP。注意家宽 IP 会变，变了通知就静默失败，不推荐。
+
+钉钉同理，选「加签」时把 `SEC` 开头的那串填进 `secret`。企业微信不需要 `secret`，密钥就在 URL 的 `key` 参数里。自定义 webhook 用 `body_template` 拼请求体，可用字段 `.Kind` `.LinkID` `.Message` `.Time`。
+
+三家在**密钥失效、机器人被移出群、签名不匹配**时都返回 HTTP 200，错误码藏在响应体里，所以 `notify test` 会把 `errcode` 一起打出来 —— 看到 ✓ 才是真的发出去了。
+
+**告警节奏**：线路连续失败达到 `probe.fail_threshold` 次时发一条 down；持续不恢复则在第 5、15、30、60 分钟各提醒一次，之后每 60 分钟一次，消息带上已持续时长；恢复时发一条 up。不想被反复打扰就把 `notify.repeat_alert` 设成 `false`。重复提醒只发通知、不写事件表，所以面板的「状态变更」列表里一次故障始终只有 down + up 两条。
+
+**一个明确的边界**：两条线**同时**中断时，通知发不出去，也不会在恢复后补发。本功能针对的是「一条线静默失效、另一条还在正常工作」—— 那也正是这个工具存在的理由。全断的时候你自己会立刻发现，不需要程序告诉你。
+
+## 让局域网访问面板
+
+默认只监听 `127.0.0.1`。想从手机或另一台机器上看，改 `config.yaml`：
+
+```yaml
+web:
+  listen: "0.0.0.0:8686"
+```
+
+**同时务必设置 `web.token`**（放 `config.local.yaml`）。不设的话，任何连上同一个 WiFi 的设备 —— 包括客人的手机和 IoT 设备 —— 都能看到你的内网拓扑、光猫地址、网卡 MAC，还能触发一次跑满带宽的测速。`doctor` 会在这种配置下告警。
+
+令牌只对来自其它设备的请求生效，本机访问永远放行（否则 CLI 和单实例检测会被自己的鉴权挡住）。浏览器首次访问会提示输入，之后记在 localStorage 里。
+
+还要在系统防火墙上放行入站：macOS 首次会弹窗询问，选「允许」；Windows 需要管理员执行 `netsh advfirewall firewall add rule name="ISP-Probe" dir=in action=allow protocol=TCP localport=8686`。`doctor` 会按平台给出对应提示。
 
 ## 几个刻意的设计取舍
 

@@ -59,6 +59,58 @@ store:
 
 notify:
   desktop: true
+  # 线路持续故障时重复提醒：首次告警后第 5/15/30/60 分钟各一次，之后每 60 分钟。
+  # 只发通知、不写 events 表 —— 那张表保持「一次故障 = 一条 down + 一条 up」。
+  repeat_alert: true
+
+  # IM 群机器人。URL 里的 key/token 等同于密钥，**不要写在这里**（本文件随仓库
+  # 提交），放到同目录下不被跟踪的 config.local.yaml 里。注意旁路文件里的
+  # webhooks 是整体替换而非追加。配好后用 `isp-probe notify test` 验证。
+  #
+  # webhooks:
+  #   - name: "企微告警群"
+  #     kind: wecom          # wecom | dingtalk | feishu | custom
+  #     url: "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=你的key"
+  #     enabled: true
+  #     events: ["down", "up", "down_repeat"]   # 留空即全部
+  #     timeout: 8s
+  #   - name: "钉钉群"
+  #     kind: dingtalk
+  #     url: "https://oapi.dingtalk.com/robot/send?access_token=你的access_token"
+  #     secret: "SECxxxxxxxx"  # 机器人安全设置选「加签」时填，选关键词则留空
+  #     enabled: true
+  #   - name: "飞书群"
+  #     kind: feishu
+  #     # 群设置 → 群机器人 → 添加机器人 → 自定义机器人，复制它给的 Webhook 地址。
+  #     # 末段那串 uuid 就是密钥，别写进本文件。
+  #     url: "https://open.feishu.cn/open-apis/bot/v2/hook/xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+  #     # 安全设置选「签名校验」时填这里给的密钥；选「自定义关键词」或「IP 白名单」则留空。
+  #     # 注意飞书的关键词是对消息正文做匹配，本工具发出的正文形如
+  #     # 「ISP探针 · 线路故障 / 电信 线路故障：…」，关键词可以填「ISP探针」或「线路」。
+  #     secret: ""
+  #     enabled: true
+  #     events: ["down", "up", "down_repeat"]
+  #     timeout: 8s
+  #   - name: "自建服务"
+  #     kind: custom
+  #     url: "https://example.com/hook"
+  #     content_type: "application/json"
+  #     body_template: '{"text":"{{.Message}}","kind":"{{.Kind}}","at":"{{.Time}}"}'
+  #     enabled: true
 
 web:
+  # 改成 0.0.0.0:8686 可让局域网内其它设备（手机等）访问面板。
+  # 一旦这么做，务必同时设置 token —— 否则任何连上同一网络的设备都能看到
+  # 内网拓扑、光猫地址、网卡 MAC，还能触发一次跑满带宽的测速。
   listen: "127.0.0.1:8686"
+  # 访问令牌。留空 = 不鉴权（仅监听环回时的默认行为）。
+  # 本机访问永远放行，令牌只对来自其它设备的请求生效。建议写进 config.local.yaml。
+  token: ""
+
+log:
+  # 留空时：前台运行输出到 stderr（与直接跑没区别），
+  # 服务模式自动落到 <本文件所在目录>/logs/isp-probe.log。
+  # 后台进程的 stderr 在 Windows 服务里等于丢弃，必须落文件才有排障可能。
+  file: ""
+  max_size_mb: 8         # 单文件超过这个大小就轮转
+  keep: 3                # 保留几个历史文件（总占用 ≈ max_size_mb × (keep+1)）

@@ -82,6 +82,7 @@ func Run(ctx context.Context, cfg config.Config, p iface.PhysicalIface, b *netbi
 	r.checkDoH(ctx, b)
 	r.checkModemChannel(ctx, cfg, b)
 	r.checkPlatform(ctx, b)
+	r.checkPanel(cfg, p)
 
 	return r
 }

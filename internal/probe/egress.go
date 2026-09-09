@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"isp-probe/internal/dnsx"
+	"isp-probe/internal/httpx"
 	"isp-probe/internal/netbind"
 )
 
@@ -40,7 +41,7 @@ func (e Egress) Describe() string {
 // 依次尝试各个数据源直到成功。所有请求都经绑定网卡发出、且目标域名由
 // DoH 自行解析 —— 否则查到的会是 clash 出口而非真实家宽出口。
 func LookupEgress(ctx context.Context, b *netbind.Binder, r *dnsx.Resolver, endpoints []string) (Egress, error) {
-	client := newHTTPClient(b, r, 12*time.Second)
+	client := httpx.NewClient(b, r, 12*time.Second)
 	var lastErr error
 
 	for _, raw := range endpoints {
@@ -67,7 +68,7 @@ func cleanISPText(txt, ip string) string {
 
 func lookupOne(ctx context.Context, client *http.Client, raw string) (Egress, error) {
 	// URL 保留域名：dialer 会用 DoH 解析它，SNI 与 Host 头因而都正确。
-	req, err := newRequest(ctx, http.MethodGet, raw, nil)
+	req, err := httpx.NewRequest(ctx, http.MethodGet, raw, nil)
 	if err != nil {
 		return Egress{}, err
 	}

@@ -8,7 +8,10 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"net"
 	"net/http"
+	"net/netip"
+	"os"
 	"sync"
 	"time"
 
@@ -16,7 +19,9 @@ import (
 	"isp-probe/internal/doctor"
 	"isp-probe/internal/iface"
 	"isp-probe/internal/netbind"
+	"isp-probe/internal/notify"
 	"isp-probe/internal/probe"
+	"isp-probe/internal/service"
 	"isp-probe/internal/store"
 )
 
@@ -24,13 +29,14 @@ import (
 var uiFS embed.FS
 
 type Server struct {
-	cfg     config.Config
-	iface   iface.PhysicalIface
-	binder  *netbind.Binder
-	monitor *probe.Monitor
-	session *probe.SpeedSession
-	db      *store.Store
-	log     *slog.Logger
+	cfg      config.Config
+	iface    iface.PhysicalIface
+	binder   *netbind.Binder
+	monitor  *probe.Monitor
+	session  *probe.SpeedSession
+	db       *store.Store
+	notifier *notify.Multi
+	log      *slog.Logger
 
 	// 自检报告较慢（要发多次网络请求），缓存起来按需刷新。
 	docMu   sync.RWMutex
@@ -42,10 +48,10 @@ type Server struct {
 }
 
 func New(cfg config.Config, p iface.PhysicalIface, b *netbind.Binder,
-	m *probe.Monitor, db *store.Store, log *slog.Logger) *Server {
+	m *probe.Monitor, db *store.Store, n *notify.Multi, log *slog.Logger) *Server {
 
 	s := &Server{
-		cfg: cfg, iface: p, binder: b, monitor: m, db: db, log: log,
+		cfg: cfg, iface: p, binder: b, monitor: m, db: db, notifier: n, log: log,
 		subs: make(map[chan struct{}]struct{}),
 	}
 	tester := probe.NewSpeedTester(b, m.Resolver(), cfg.Speed)
@@ -70,6 +76,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/speed/confirm", s.handleSpeedConfirm)
 	mux.HandleFunc("POST /api/speed/stop", s.handleSpeedStop)
 	mux.HandleFunc("GET /api/stream", s.handleStream)
+	mux.HandleFunc("GET /api/notify", s.handleNotify)
+	mux.HandleFunc("POST /api/notify/test", s.handleNotifyTest)
 
 	sub, err := fs.Sub(uiFS, "ui")
 	if err != nil {
@@ -77,7 +85,7 @@ func (s *Server) Handler() http.Handler {
 	} else {
 		mux.Handle("GET /", http.FileServerFS(sub))
 	}
-	return mux
+	return authMiddleware(s.cfg.Web.Token, mux)
 }
 
 // Run 启动 HTTP 服务并在 ctx 取消时优雅关闭。
@@ -109,7 +117,8 @@ func (s *Server) Run(ctx context.Context) error {
 		srv.Shutdown(sctx)
 	}()
 
-	s.log.Info("面板已启动", "地址", "http://"+s.cfg.Web.Listen)
+	s.log.Info("面板已启动", "本机", localURL(s.cfg.Web.Listen),
+		"局域网", lanURL(s.cfg.Web.Listen, s.iface.IPv4))
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		return err
 	}
@@ -180,14 +189,25 @@ func (s *Server) writeEvent(w http.ResponseWriter, f http.Flusher) {
 
 // ---- API ----
 
+// AppID 是 /api/status 里的固定标识。
+//
+// 另一个实例启动时会 GET 这个接口，靠它区分「端口上是我们自己」和
+// 「端口被无关程序占了」—— 两种情况的处理建议完全不同。
+const AppID = "isp-probe"
+
 type statusResponse struct {
-	Links          []probe.LinkStatus  `json:"links"`
-	CombinedRTTms  float64             `json:"combined_rtt_ms"`
-	Speed          probe.SessionState  `json:"speed"`
-	Iface          ifaceInfo           `json:"iface"`
-	Router         routerInfo          `json:"router"`
-	ProbeInterval  float64             `json:"probe_interval_sec"`
-	Now            time.Time           `json:"now"`
+	// 身份字段，供单实例检测识别占用者。
+	App  string `json:"app"`
+	PID  int    `json:"pid"`
+	Mode string `json:"mode"` // "service" | "foreground"
+
+	Links         []probe.LinkStatus `json:"links"`
+	CombinedRTTms float64            `json:"combined_rtt_ms"`
+	Speed         probe.SessionState `json:"speed"`
+	Iface         ifaceInfo          `json:"iface"`
+	Router        routerInfo         `json:"router"`
+	ProbeInterval float64            `json:"probe_interval_sec"`
+	Now           time.Time          `json:"now"`
 }
 
 type ifaceInfo struct {
@@ -209,7 +229,14 @@ func (s *Server) statusPayload() statusResponse {
 	if adminURL == "" && s.iface.Gateway.IsValid() {
 		adminURL = "http://" + s.iface.Gateway.String()
 	}
+	mode := "foreground"
+	if service.IsManaged() {
+		mode = "service"
+	}
 	return statusResponse{
+		App:           AppID,
+		PID:           os.Getpid(),
+		Mode:          mode,
 		Links:         s.monitor.Status(),
 		CombinedRTTms: float64(s.monitor.CombinedRTT().Microseconds()) / 1000,
 		Speed:         s.session.State(),
@@ -266,10 +293,10 @@ func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {
 	}
 
 	type point struct {
-		TS    int64   `json:"ts"`
-		OK    bool    `json:"ok"`
-		RTT   float64 `json:"rtt_ms"`
-		Detail string `json:"detail,omitempty"`
+		TS     int64   `json:"ts"`
+		OK     bool    `json:"ok"`
+		RTT    float64 `json:"rtt_ms"`
+		Detail string  `json:"detail,omitempty"`
 	}
 	out := make([]point, 0, len(samples))
 	for _, x := range samples {
@@ -363,4 +390,33 @@ func writeJSON(w http.ResponseWriter, v any) {
 	if err := enc.Encode(v); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
+}
+
+// localURL / lanURL 给出人能直接点开的地址。
+//
+// 监听 0.0.0.0 时打印 "http://0.0.0.0:8686" 对谁都没用：它不是一个能连的
+// 目标，只是「所有接口」的写法。环回地址永远给，局域网地址只在真的开放了
+// 才给 —— 否则会诱导用户去试一个连不上的链接。
+func localURL(listen string) string {
+	_, port, err := net.SplitHostPort(listen)
+	if err != nil {
+		return "http://" + listen
+	}
+	return "http://" + net.JoinHostPort("127.0.0.1", port)
+}
+
+func lanURL(listen string, ip netip.Addr) string {
+	host, port, err := net.SplitHostPort(listen)
+	if err != nil {
+		return ""
+	}
+	switch host {
+	case "", "0.0.0.0", "::", "[::]":
+	default:
+		return "" // 绑了具体地址，没有「另一个」局域网地址可言
+	}
+	if !ip.IsValid() {
+		return ""
+	}
+	return "http://" + net.JoinHostPort(ip.String(), port)
 }

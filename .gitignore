@@ -7,8 +7,13 @@
 *.db
 *.db-shm
 *.db-wal
+/logs/
+*.lock
 
 # 编辑器
 .vscode/
 .idea/
 .DS_Store
+
+# 旁路配置（含 webhook 密钥，不提交）
+config.local.yaml

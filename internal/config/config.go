@@ -6,10 +6,15 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"net/netip"
+	"net/url"
 	"os"
+	"path/filepath"
+	"slices"
 	"strings"
+	"text/template"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -24,6 +29,7 @@ type Config struct {
 	Store  StoreConfig  `yaml:"store"`
 	Notify NotifyConfig `yaml:"notify"`
 	Web    WebConfig    `yaml:"web"`
+	Log    LogConfig    `yaml:"log"`
 }
 
 type IfaceConfig struct {
@@ -90,8 +96,8 @@ type SpeedConfig struct {
 	// DownloadURLs 下行测速源，需支持大文件与 Range。
 	DownloadURLs []string `yaml:"download_urls"`
 	// UploadURL 上行测速端点（接受 POST 并丢弃 body）。
-	UploadURL string `yaml:"upload_url"`
-	Streams   int    `yaml:"streams"`  // 并发连接数，跑满千兆需要多流
+	UploadURL string        `yaml:"upload_url"`
+	Streams   int           `yaml:"streams"`  // 并发连接数，跑满千兆需要多流
 	Duration  time.Duration `yaml:"duration"` // 单向测速时长
 	// EgressURLs 查询出口 IP 与运营商归属的服务，多源交叉。
 	EgressURLs []string `yaml:"egress_urls"`
@@ -104,10 +110,56 @@ type StoreConfig struct {
 
 type NotifyConfig struct {
 	Desktop bool `yaml:"desktop"` // 系统桌面通知
+	// RepeatAlert 控制持续故障是否重复提醒。关掉则退化成「状态跃迁各发一次」。
+	RepeatAlert bool            `yaml:"repeat_alert"`
+	Webhooks    []WebhookConfig `yaml:"webhooks"`
+}
+
+// 支持的 IM 机器人类型。
+const (
+	KindWeCom    = "wecom"
+	KindDingTalk = "dingtalk"
+	KindFeishu   = "feishu"
+	KindCustom   = "custom"
+)
+
+// WebhookKinds 是全部合法的 kind，供校验与错误提示复用。
+var WebhookKinds = []string{KindWeCom, KindDingTalk, KindFeishu, KindCustom}
+
+// WebhookConfig 是一个 IM 群机器人。
+//
+// URL 里通常带着 key/token，等同于密钥 —— 不要写进随仓库提交的 config.yaml，
+// 放到同目录下不被跟踪的 config.local.yaml 里。
+type WebhookConfig struct {
+	Name    string `yaml:"name"`
+	Kind    string `yaml:"kind"` // wecom | dingtalk | feishu | custom
+	URL     string `yaml:"url"`
+	Secret  string `yaml:"secret"` // 钉钉/飞书加签用；企微不需要
+	Enabled bool   `yaml:"enabled"`
+	// Events 是订阅的事件类型，留空即全部（down / up / down_repeat）。
+	Events  []string      `yaml:"events"`
+	Timeout time.Duration `yaml:"timeout"`
+	// 以下两项仅 kind=custom 有意义。
+	ContentType  string `yaml:"content_type"`
+	BodyTemplate string `yaml:"body_template"`
 }
 
 type WebConfig struct {
 	Listen string `yaml:"listen"`
+	// Token 非空时，来自非环回地址的请求必须带上它才能访问接口。
+	// 留空 = 不鉴权（面板只监听 127.0.0.1 时的既有行为）。
+	Token string `yaml:"token"`
+}
+
+// LogConfig 控制诊断日志的去向与轮转。
+//
+// File 留空时：前台运行保持输出到 stderr（行为与服务化之前完全一致），
+// 服务模式则自动落到 <配置目录>/logs/isp-probe.log —— 后台进程的 stderr
+// 在 Windows 服务里等于丢弃，必须落文件才有排障可能。
+type LogConfig struct {
+	File      string `yaml:"file"`
+	MaxSizeMB int    `yaml:"max_size_mb"` // 单文件上限，超过即轮转
+	Keep      int    `yaml:"keep"`        // 保留几个历史文件
 }
 
 // Default 返回内置默认值，对应本机实测得到的拓扑。
@@ -132,7 +184,7 @@ func Default() Config {
 				"https://mirrors.ustc.edu.cn/ubuntu-releases/20.04.6/ubuntu-20.04.6-desktop-amd64.iso",
 				"https://mirrors.aliyun.com/ubuntu-releases/20.04.6/ubuntu-20.04.6-desktop-amd64.iso",
 			},
-			UploadURL:  "https://speed.cloudflare.com/__up",
+			UploadURL: "https://speed.cloudflare.com/__up",
 			EgressURLs: []string{
 				"https://myip.ipip.net",
 				"https://cip.cc",
@@ -140,25 +192,84 @@ func Default() Config {
 			},
 		},
 		Store:  StoreConfig{Path: "isp-probe.db", RawRetain: 7 * 24 * time.Hour},
-		Notify: NotifyConfig{Desktop: true},
+		Notify: NotifyConfig{Desktop: true, RepeatAlert: true},
 		Web:    WebConfig{Listen: "127.0.0.1:8686"},
+		Log:    LogConfig{MaxSizeMB: 8, Keep: 3},
 	}
 }
 
-// Load 读取配置文件；文件不存在时返回默认配置。
+// ErrConfigNotFound 让调用方能区分「文件不存在」与「内容有问题」。
+var ErrConfigNotFound = errors.New("配置文件不存在")
+
+// Load 读取并校验配置。path 必须是已经定位好的真实路径。
+//
+// 相对形式的 store.path / log.file 会被锚定到 path 所在目录，使得配置、
+// 数据库、日志能作为一个整体搬走 —— 服务模式下 cwd 不由我们决定，
+// 相对路径若不锚定就会落到 `/` 或 System32。
 func Load(path string) (Config, error) {
 	cfg := Default()
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return cfg, cfg.validate()
+			// 这里曾经静默返回 Default()，而 Default().Links 为空，
+			// 用户看到的报错是「配置中未定义任何线路」—— 与真实原因南辕北辙。
+			return cfg, fmt.Errorf("%w: %s", ErrConfigNotFound, path)
 		}
 		return cfg, fmt.Errorf("读取配置 %s 失败: %w", path, err)
 	}
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return cfg, fmt.Errorf("解析配置 %s 失败: %w", path, err)
 	}
-	return cfg, cfg.validate()
+	if err := mergeLocal(&cfg, filepath.Join(filepath.Dir(path), LocalName)); err != nil {
+		return cfg, err
+	}
+	if err := cfg.validate(); err != nil {
+		return cfg, err
+	}
+	cfg.Anchor(filepath.Dir(path))
+	return cfg, nil
+}
+
+// LocalName 是旁路配置的文件名。
+//
+// 存在的理由：config.yaml 随仓库提交，而 webhook URL 里的 key 是密钥。
+// 旁路文件不进 git（见 .gitignore），只写需要覆盖的字段。
+const LocalName = "config.local.yaml"
+
+// mergeLocal 把旁路配置叠加到 cfg 上。
+//
+// 叠加语义就是 yaml.v3 对同一个 struct 反序列化两次的语义：出现的字段覆盖，
+// 未出现的保留。注意**切片是整体替换而不是追加** —— 旁路里写了 webhooks
+// 就是全量覆盖主配置里那份，不会合并。
+//
+// 文件不存在是正常情况（多数人不配 IM 通知），静默跳过；但存在却解析失败
+// 必须报错：静默忽略会让人以为密钥已经生效，实际一条告警都发不出去。
+func mergeLocal(cfg *Config, path string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("读取旁路配置 %s 失败: %w", path, err)
+	}
+	if err := yaml.Unmarshal(data, cfg); err != nil {
+		return fmt.Errorf("解析旁路配置 %s 失败: %w", path, err)
+	}
+	return nil
+}
+
+// Anchor 把相对路径锚定到 base。重复调用是安全的：已绝对化的值不再变动。
+func (c *Config) Anchor(base string) {
+	if base == "" {
+		return
+	}
+	fix := func(s *string) {
+		if *s != "" && !filepath.IsAbs(*s) {
+			*s = filepath.Join(base, *s)
+		}
+	}
+	fix(&c.Store.Path)
+	fix(&c.Log.File)
 }
 
 func (c *Config) validate() error {
@@ -197,6 +308,52 @@ func (c *Config) validate() error {
 	}
 	if c.Speed.Streams <= 0 {
 		c.Speed.Streams = 6
+	}
+	if c.Log.MaxSizeMB <= 0 {
+		c.Log.MaxSizeMB = 8
+	}
+	if c.Log.Keep <= 0 {
+		c.Log.Keep = 3
+	}
+	if err := c.validateWebhooks(); err != nil {
+		return err
+	}
+	return nil
+}
+
+// validateWebhooks 校验通知渠道。
+//
+// 这里对 custom 模板做一次试解析：模板写错是配置问题，应该在启动时就报出来，
+// 而不是等到线路真的断了、最需要告警的那一刻才发现发不出去。
+func (c *Config) validateWebhooks() error {
+	for i := range c.Notify.Webhooks {
+		w := &c.Notify.Webhooks[i]
+		label := w.Name
+		if label == "" {
+			label = fmt.Sprintf("第 %d 个", i+1)
+		}
+		if !slices.Contains(WebhookKinds, w.Kind) {
+			return fmt.Errorf("通知渠道 %s 的 kind %q 无效，可选：%s",
+				label, w.Kind, strings.Join(WebhookKinds, " / "))
+		}
+		if w.Name == "" {
+			w.Name = w.Kind
+		}
+		u, err := url.Parse(w.URL)
+		if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+			return fmt.Errorf("通知渠道 %s 的 url 不是合法的 http(s) 地址: %q", w.Name, w.URL)
+		}
+		if w.Kind == KindCustom {
+			if w.BodyTemplate == "" {
+				return fmt.Errorf("通知渠道 %s 是 custom 类型，必须提供 body_template", w.Name)
+			}
+			if _, err := template.New("webhook").Parse(w.BodyTemplate); err != nil {
+				return fmt.Errorf("通知渠道 %s 的 body_template 语法有误: %w", w.Name, err)
+			}
+		}
+		if w.Timeout <= 0 {
+			w.Timeout = 8 * time.Second
+		}
 	}
 	return nil
 }

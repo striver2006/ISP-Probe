@@ -66,6 +66,7 @@ td.num{text-align:right;font-family:ui-monospace,Menlo,monospace}
 .chk .dt{color:var(--muted);font-size:12.5px}
 .chk .ht{color:var(--accent);font-size:12px;margin-top:2px}
 .ic.ok{color:var(--ok)} .ic.fail{color:var(--bad)} .ic.warn{color:var(--warn)} .ic.info{color:var(--muted)}
+.txt-ok{color:var(--ok)} .txt-bad{color:var(--bad)}
 .muted{color:var(--muted)}
 .right{margin-left:auto}
 .row{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
@@ -112,6 +113,11 @@ details summary{cursor:pointer;font-size:14px;font-weight:600}
   </div>
 
   <div class="card">
+    <h2>通知渠道</h2>
+    <div id="notify" class="muted">加载中…</div>
+  </div>
+
+  <div class="card">
     <h2>状态变更</h2>
     <div id="events" class="muted">暂无事件</div>
   </div>
@@ -130,6 +136,29 @@ details summary{cursor:pointer;font-size:14px;font-weight:600}
 <script>
 const $ = s => document.querySelector(s);
 let lastStatus = null, docLoaded = false;
+
+// 访问令牌。面板开放到局域网时后端会要求它；只监听环回时 token 为空，
+// 这里的一切都是空操作。存 localStorage，免得每次刷新都要重输。
+let token = localStorage.getItem('isp-token') || '';
+
+// api 统一封装取数：带上令牌、解析 JSON、401 时要求重新输入。
+async function api(path, opts = {}) {
+  const headers = Object.assign({}, opts.headers);
+  if (token) headers['X-ISP-Token'] = token;
+  const r = await fetch(path, Object.assign({}, opts, { headers }));
+  if (r.status === 401) { promptToken(); throw new Error('unauthorized'); }
+  return r.json();
+}
+
+// apiSafe 用于「拿不到就算了」的场景，失败返回 fallback。
+async function apiSafe(path, fallback, opts) {
+  try { return await api(path, opts); } catch (_) { return fallback; }
+}
+
+function promptToken() {
+  const t = window.prompt('该面板需要访问令牌（config 中的 web.token）');
+  if (t) { token = t; localStorage.setItem('isp-token', t); location.reload(); }
+}
 
 function fmt(n, d = 1) { return (n || 0).toFixed(d); }
 function timeStr(ts) {
@@ -219,9 +248,9 @@ function renderSpeed(d) {
       </div>`;
     $('#btnConfirm').onclick = e => {
       e.target.disabled = true;
-      fetch('/api/speed/confirm', { method: 'POST' });
+      api('/api/speed/confirm', { method: 'POST' });
     };
-    $('#btnCancel').onclick = () => fetch('/api/speed/stop', { method: 'POST' });
+    $('#btnCancel').onclick = () => api('/api/speed/stop', { method: 'POST' });
 
   } else if (h.active) {
     // 已测完一条，必须改绑才能测另一条。
@@ -300,7 +329,7 @@ async function loadCharts(d) {
   const box = $('#charts');
   let html = '';
   for (const l of d.links) {
-    const pts = await fetch(`/api/history?link=${encodeURIComponent(l.id)}&hours=6`).then(r => r.json()).catch(() => []);
+    const pts = await apiSafe(`/api/history?link=${encodeURIComponent(l.id)}&hours=6`, []);
     html += `<div style="margin-bottom:14px"><div class="row"><b>${l.name}</b>
       <span class="muted right">${(pts || []).length} 个采样点</span></div>${sparkline(pts || [])}</div>`;
   }
@@ -308,7 +337,7 @@ async function loadCharts(d) {
 }
 
 async function loadStats() {
-  const st = await fetch('/api/stats?hours=24').then(r => r.json()).catch(() => null);
+  const st = await apiSafe('/api/stats?hours=24', null);
   if (!st) return;
   for (const [id, v] of Object.entries(st)) {
     const a = document.getElementById('st-' + id), b = document.getElementById('rt-' + id);
@@ -320,7 +349,7 @@ async function loadStats() {
 }
 
 async function loadEvents() {
-  const evs = await fetch('/api/events').then(r => r.json()).catch(() => []);
+  const evs = await apiSafe('/api/events', []);
   if (!evs || !evs.length) { $('#events').innerHTML = '<span class="muted">暂无事件</span>'; return; }
   $('#events').innerHTML = `<table><tbody>${evs.map(e => `
     <tr><td style="width:130px" class="muted">${dateStr(e.TS)}</td>
@@ -329,7 +358,7 @@ async function loadEvents() {
 }
 
 async function loadSpeedHistory() {
-  const rs = await fetch('/api/speeds').then(r => r.json()).catch(() => []);
+  const rs = await apiSafe('/api/speeds', []);
   if (!rs || !rs.length) { $('#speedHistory').innerHTML = '<span class="muted">暂无记录</span>'; return; }
   $('#speedHistory').innerHTML = `<table>
     <thead><tr><th>时间</th><th>线路</th><th class="num">下行</th><th class="num">上行</th><th>出口</th><th>链路</th></tr></thead>
@@ -345,7 +374,7 @@ async function loadSpeedHistory() {
 
 async function loadDoctor(refresh) {
   $('#doctor').innerHTML = '<span class="muted">检测中…</span>';
-  const rep = await fetch('/api/doctor' + (refresh ? '?refresh=1' : '')).then(r => r.json()).catch(() => null);
+  const rep = await apiSafe('/api/doctor' + (refresh ? '?refresh=1' : ''), null);
   if (!rep) { $('#doctor').innerHTML = '<span class="muted">检测失败</span>'; return; }
   $('#docTime').textContent = '检测于 ' + dateStr(rep.ts);
   $('#doctor').innerHTML = rep.checks.map(c => `
@@ -363,10 +392,51 @@ function apply(d) {
   loadStats();
 }
 
+// 通知渠道卡片。展示的是脱敏地址 —— 后端不回传完整 URL，那里面的 key
+// 等同于发消息的权限，而面板可能开放在局域网上。
+async function loadNotify() {
+  const cs = await apiSafe('/api/notify', []);
+  const box = $('#notify');
+  if (!cs.length) {
+    box.className = 'muted';
+    box.textContent = '未配置 IM 通知。在 config.local.yaml 中添加 notify.webhooks 即可在掉线时收到消息。';
+    return;
+  }
+  box.className = '';
+  box.innerHTML = cs.map((c, i) => {
+    let state = '<span class="muted">尚未发送</span>';
+    if (c.last_try) {
+      state = c.last_ok
+        ? `<span class="txt-ok">✓ ${ago(new Date(c.last_try).getTime())}</span>`
+        : `<span class="txt-bad">✗ ${c.last_err || '发送失败'}</span>`;
+    }
+    if (!c.enabled) state = '<span class="muted">已禁用</span>';
+    return `<div class="kv">
+      <span>${c.name} <span class="muted">${c.kind} · ${c.target}</span></span>
+      <span>${state} <button data-i="${i}" data-name="${c.name}" class="ntest">测试</button></span>
+    </div>`;
+  }).join('');
+  box.querySelectorAll('.ntest').forEach(b => {
+    b.onclick = async () => {
+      b.disabled = true;
+      b.textContent = '发送中…';
+      const res = await apiSafe('/api/notify/test', [], {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: b.dataset.name }),
+      });
+      const r = res[0];
+      b.textContent = r ? (r.ok ? '已发送' : '失败') : '失败';
+      setTimeout(loadNotify, 1500);
+    };
+  });
+}
+
 // SSE 实时更新
 let es;
 function connect() {
-  es = new EventSource('/api/stream');
+  // EventSource 不支持自定义请求头，令牌只能走 query —— 改成 header 会让面板停止刷新。
+  es = new EventSource('/api/stream' + (token ? '?token=' + encodeURIComponent(token) : ''));
   es.onopen = () => { $('#conn').textContent = '实时连接'; };
   es.onmessage = e => { try { apply(JSON.parse(e.data)); } catch (_) { } };
   es.onerror = () => {
@@ -378,23 +448,25 @@ function connect() {
 
 $('#btnSpeed').onclick = async () => {
   $('#btnSpeed').disabled = true;
-  await fetch('/api/speed/start', { method: 'POST' });
+  await api('/api/speed/start', { method: 'POST' });
 };
-$('#btnStop').onclick = () => fetch('/api/speed/stop', { method: 'POST' });
+$('#btnStop').onclick = () => api('/api/speed/stop', { method: 'POST' });
 $('#btnDoc').onclick = () => loadDoctor(true);
 $('#docDetails').addEventListener('toggle', e => {
   if (e.target.open && !docLoaded) { docLoaded = true; loadDoctor(false); }
 });
 
 // 初始加载
-fetch('/api/status').then(r => r.json()).then(d => {
+apiSafe('/api/status', null).then(d => {
+  if (!d) return;
   apply(d);
   loadCharts(d);
 });
 connect();
 loadEvents();
 loadSpeedHistory();
-setInterval(() => { if (lastStatus) loadCharts(lastStatus); loadEvents(); loadSpeedHistory(); loadStats(); }, 60000);
+loadNotify();
+setInterval(() => { if (lastStatus) loadCharts(lastStatus); loadEvents(); loadSpeedHistory(); loadStats(); loadNotify(); }, 60000);
 </script>
 </body>
 </html>

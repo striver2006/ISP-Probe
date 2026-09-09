@@ -13,6 +13,7 @@ import (
 
 	"isp-probe/internal/config"
 	"isp-probe/internal/dnsx"
+	"isp-probe/internal/httpx"
 	"isp-probe/internal/netbind"
 )
 
@@ -90,7 +91,7 @@ func (s *SpeedTester) Download(ctx context.Context, onProgress ProgressFunc) (fl
 func (s *SpeedTester) downloadStream(ctx context.Context, client *http.Client, url string, counter *atomic.Int64) error {
 	var lastErr error
 	for ctx.Err() == nil {
-		req, err := newRequest(ctx, http.MethodGet, url, nil)
+		req, err := httpx.NewRequest(ctx, http.MethodGet, url, nil)
 		if err != nil {
 			return err
 		}
@@ -169,7 +170,7 @@ func (s *SpeedTester) uploadStream(ctx context.Context, client *http.Client, cou
 	var lastErr error
 	for ctx.Err() == nil {
 		body := io.LimitReader(&randomReader{counter: counter}, uploadChunk)
-		req, err := newRequest(ctx, http.MethodPost, s.cfg.UploadURL, body)
+		req, err := httpx.NewRequest(ctx, http.MethodPost, s.cfg.UploadURL, body)
 		if err != nil {
 			return err
 		}

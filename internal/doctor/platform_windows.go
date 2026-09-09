@@ -47,3 +47,9 @@ func explainBlockErr(err error) (blocked bool, hint string) {
 	}
 	return false, ""
 }
+
+// firewallHint 说明本平台放行入站连接需要做什么。
+func firewallHint() string {
+	return `Windows 防火墙默认拦截入站，需以管理员身份放行：` +
+		`netsh advfirewall firewall add rule name="ISP-Probe" dir=in action=allow protocol=TCP localport=8686`
+}

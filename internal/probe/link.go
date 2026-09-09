@@ -24,8 +24,11 @@ import (
 const CombinedLinkID = "_combined"
 
 // Notifier 是告警通知的抽象，便于测试替换。
+//
+// 传整个 store.Event 而非拼好的 (title, message)：IM 渠道要按 Kind 过滤、
+// 要区分展示样式，只给两个字符串就什么都做不了。
 type Notifier interface {
-	Notify(title, message string) error
+	Notify(ctx context.Context, ev store.Event) error
 }
 
 // LinkStatus 是一条线路的当前状态。
@@ -49,6 +52,10 @@ type LinkStatus struct {
 	// ForcedOK 表示最近一次强制递归查询成功，即该线上游真实可达
 	// （而不只是命中了光猫的本地缓存）。
 	ForcedOK bool `json:"forced_ok"`
+
+	// 重复提醒的记账。不进 JSON —— 面板不需要，它看的是 Since。
+	lastAlert  time.Time // 上次发出提醒的时刻（含首次 down）
+	alertCount int       // 已发提醒次数，恢复时清零
 }
 
 // Monitor 负责周期性探测所有线路并维护状态机。
@@ -70,6 +77,9 @@ type Monitor struct {
 
 	subMu sync.Mutex
 	subs  map[chan struct{}]struct{}
+
+	// done 在 Run 返回时关闭，让调用方能在关数据库之前等它收尾。
+	done chan struct{}
 }
 
 func NewMonitor(cfg config.Config, b *netbind.Binder, db *store.Store, n Notifier, log *slog.Logger) *Monitor {
@@ -83,6 +93,7 @@ func NewMonitor(cfg config.Config, b *netbind.Binder, db *store.Store, n Notifie
 		log:      log,
 		status:   make(map[string]*LinkStatus),
 		subs:     make(map[chan struct{}]struct{}),
+		done:     make(chan struct{}),
 	}
 	for _, l := range cfg.Links {
 		m.status[l.ID] = &LinkStatus{ID: l.ID, Name: l.Name, Healthy: true, Since: time.Now()}
@@ -138,8 +149,16 @@ func (m *Monitor) broadcast() {
 	}
 }
 
+// Done 在 Run 返回后关闭。
+//
+// 调用方据此确保最后一轮采样已经落库，再去关闭数据库 —— 否则
+// db.Close() 可能先于写入完成，本轮数据白采。
+func (m *Monitor) Done() <-chan struct{} { return m.done }
+
 // Run 启动周期探测，直到 ctx 取消。
 func (m *Monitor) Run(ctx context.Context) {
+	defer close(m.done)
+
 	m.RunOnce(ctx)
 
 	t := time.NewTicker(m.cfg.Probe.Interval)
@@ -192,11 +211,17 @@ func (m *Monitor) RunOnce(ctx context.Context) {
 	// 采样齐了才能做交叉验证 —— 它比较的是各线之间的差异。
 	markDistinct(samples)
 
+	// 落库阶段脱离 ctx 的取消：退出时 ctx 已经取消，若沿用它，ExecContext
+	// 会立刻返回 context.Canceled，本轮辛苦采到的数据一条都写不进去。
+	// 探测本身该被取消，写入不该。
+	wctx, wcancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer wcancel()
+
 	for i := range m.cfg.Links {
-		if err := m.db.InsertSample(ctx, samples[i]); err != nil {
+		if err := m.db.InsertSample(wctx, samples[i]); err != nil {
 			m.log.Warn("写入采样失败", "link", m.cfg.Links[i].ID, "err", err)
 		}
-		m.updateStatus(ctx, &m.cfg.Links[i], samples[i])
+		m.updateStatus(wctx, &m.cfg.Links[i], samples[i])
 	}
 	m.broadcast()
 }
@@ -330,7 +355,9 @@ func (m *Monitor) updateStatus(ctx context.Context, l *config.LinkConfig, s stor
 	st.Distinct = s.DistinctOK
 	st.DNSRTTms = float64(s.DNSRTT.Microseconds()) / 1000
 
+	// event 是状态跃迁，要落库；repeat 是持续故障的重复提醒，只通知不落库。
 	var event *store.Event
+	var repeat *store.Event
 
 	if s.OK {
 		st.LastOK = s.TS
@@ -339,6 +366,8 @@ func (m *Monitor) updateStatus(ctx context.Context, l *config.LinkConfig, s stor
 			st.Healthy = true
 			st.Since = s.TS
 			st.Reason = "已恢复"
+			st.lastAlert = time.Time{}
+			st.alertCount = 0
 			event = &store.Event{TS: s.TS, LinkID: l.ID, Kind: "up",
 				Message: fmt.Sprintf("%s 线路已恢复", l.Name)}
 		} else {
@@ -347,30 +376,62 @@ func (m *Monitor) updateStatus(ctx context.Context, l *config.LinkConfig, s stor
 	} else {
 		st.ConsecutiveFail++
 		st.Reason = s.Detail
-		if st.Healthy && st.ConsecutiveFail >= m.cfg.Probe.FailThreshold {
+		switch {
+		case st.Healthy && st.ConsecutiveFail >= m.cfg.Probe.FailThreshold:
 			st.Healthy = false
 			st.Since = s.TS
+			st.lastAlert = s.TS
+			st.alertCount = 1
 			event = &store.Event{TS: s.TS, LinkID: l.ID, Kind: "down",
 				Message: fmt.Sprintf("%s 线路故障：%s", l.Name, s.Detail)}
+
+		case !st.Healthy && m.cfg.Notify.RepeatAlert &&
+			s.TS.Sub(st.lastAlert) >= repeatDelay(st.alertCount):
+			// 故障还在持续。只发通知、不写 events —— 那张表要保持
+			// 「一次故障 = 一条 down + 一条 up」，否则面板事件列表会被刷屏。
+			st.lastAlert = s.TS
+			st.alertCount++
+			mins := int(s.TS.Sub(st.Since).Minutes())
+			repeat = &store.Event{TS: s.TS, LinkID: l.ID, Kind: "down_repeat",
+				Message: fmt.Sprintf("%s 线路仍未恢复（已持续 %d 分钟）：%s", l.Name, mins, s.Detail)}
 		}
 	}
 	m.mu.Unlock()
 
-	if event == nil {
+	if event != nil {
+		if err := m.db.InsertEvent(ctx, *event); err != nil {
+			m.log.Warn("写入事件失败", "err", err)
+		}
+		m.log.Info("线路状态变更", "link", l.ID, "kind", event.Kind, "msg", event.Message)
+	}
+
+	// 通知开关下沉到构造 Notifier 时决定（见 serve.go）。这里再判一次
+	// cfg.Notify.Desktop 会让「关掉桌面通知、只用 IM」的配置一条都发不出去。
+	out := event
+	if out == nil {
+		out = repeat
+	}
+	if out == nil || m.notifier == nil {
 		return
 	}
-	if err := m.db.InsertEvent(ctx, *event); err != nil {
-		m.log.Warn("写入事件失败", "err", err)
+	if err := m.notifier.Notify(ctx, *out); err != nil {
+		m.log.Warn("发送通知失败", "err", err)
 	}
-	m.log.Info("线路状态变更", "link", l.ID, "kind", event.Kind, "msg", event.Message)
+}
 
-	if m.notifier != nil && m.cfg.Notify.Desktop {
-		title := "ISP探针 · 线路故障"
-		if event.Kind == "up" {
-			title = "ISP探针 · 线路恢复"
-		}
-		if err := m.notifier.Notify(title, event.Message); err != nil {
-			m.log.Warn("发送桌面通知失败", "err", err)
-		}
+// repeatDelay 是持续故障第 n 次提醒后、到下一次提醒的间隔。
+//
+// 递增而非固定：刚断的时候提醒密一些（你可能正好在电脑前，能马上处理），
+// 断久了变稀（已经知道了，不必每半小时骚扰一次）。
+func repeatDelay(sent int) time.Duration {
+	switch sent {
+	case 1:
+		return 5 * time.Minute
+	case 2:
+		return 15 * time.Minute
+	case 3:
+		return 30 * time.Minute
+	default:
+		return 60 * time.Minute
 	}
 }
